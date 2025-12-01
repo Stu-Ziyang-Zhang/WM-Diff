@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
 import sys
+from torch.utils.checkpoint import checkpoint
 
 
 def linear_beta_schedule(timesteps, start=0.0001, end=0.02):
@@ -287,7 +288,8 @@ class DiffusionCondUNet(nn.Module):
         dim=32,
         dim_mults=(1, 2, 4, 8),
         base_ch=32,
-        growth_rate=32
+        growth_rate=32,
+        use_checkpoint=False
     ):
         super().__init__()
 
@@ -295,6 +297,7 @@ class DiffusionCondUNet(nn.Module):
         self.init_conv = nn.Conv2d(in_channels, dim, 3, padding=1)
         in_out = list(zip(dims[:-1], dims[1:]))
         self.cond_net = WMDiff(in_channels=in_channels, out_channels=out_channels, base_ch=base_ch, growth_rate=growth_rate)
+        self.use_checkpoint = use_checkpoint
 
         self.down_blocks = nn.ModuleList([])
         curr_dim = dim
@@ -337,7 +340,11 @@ class DiffusionCondUNet(nn.Module):
             cond_features = []
 
             def save_features_hook(module, input, output):
-                cond_features.append(output)
+                # Detach features to reduce memory footprint when gradients are not required
+                if not train_cond_net:
+                    cond_features.append(output.detach())
+                else:
+                    cond_features.append(output)
 
             handles = []
             handles.append(self.cond_net.enc1.register_forward_hook(save_features_hook))
@@ -357,22 +364,38 @@ class DiffusionCondUNet(nn.Module):
         h = [x]
 
         for i, (block1, block2, downsample) in enumerate(self.down_blocks):
-            x = block1(x)
-            x = block2(x, cond_features[i])
+            if self.use_checkpoint and train_cond_net and self.training:
+                x = checkpoint(block1, x, use_reentrant=False)
+            else:
+                x = block1(x)
+            cond_feat = cond_features[i].detach() if not train_cond_net else cond_features[i]
+            if self.use_checkpoint and train_cond_net and self.training:
+                x = checkpoint(block2, x, cond_feat, use_reentrant=False)
+            else:
+                x = block2(x, cond_feat)
             x = downsample(x)
             h.append(x)
 
         x = self.mid_block1(x)
-        x = self.mid_attn(x, cond_features[3])
+        cond_feat_mid = cond_features[3].detach() if not train_cond_net else cond_features[3]
+        x = self.mid_attn(x, cond_feat_mid)
         x = self.mid_block2(x)
 
         for i, (block1, block2, upsample) in enumerate(self.up_blocks):
-            x = torch.cat([x, h.pop()], dim=1)
+            skip_conn = h.pop()
+            x = torch.cat([x, skip_conn], dim=1)
             x = block1(x)
-            x = block2(x, cond_features[4 + i])
+            cond_feat = cond_features[4 + i].detach() if not train_cond_net else cond_features[4 + i]
+            x = block2(x, cond_feat)
             x = upsample(x)
-        x = torch.cat([x, h.pop()], dim=1)
+        
+        final_skip = h.pop()
+        x = torch.cat([x, final_skip], dim=1)
         x = self.final_conv(x)
+
+        del cond_features
+        if x.device.type == 'cuda':
+            torch.cuda.empty_cache()
 
         return x
 
