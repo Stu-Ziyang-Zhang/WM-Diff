@@ -49,6 +49,7 @@ def parse_args():
     parser.add_argument('--cycle_len', default=5, type=int, help='Cosine annealing cycle length')
     parser.add_argument('--gradient_accumulation_steps', default=0, type=int, help='Gradient accumulation steps')
     parser.add_argument('--mixed_precision', default=False, type=bool, help='Use mixed precision training')
+    parser.add_argument('--use_checkpoint', default=False, type=bool, help='Use gradient checkpointing to reduce memory usage')
     parser.add_argument('--do_not_save', default=False, type=bool, help='Do not save anything')
 
     parser.add_argument('--start_epoch', default=1, type=int, help='Start epoch')
@@ -84,9 +85,9 @@ def load_config(config_path):
         if config_path.endswith('.yaml') or config_path.endswith('.yml'):
             config = yaml.safe_load(file_content)
         elif config_path.endswith('.json'):
-                config = json.loads(file_content)
-            else:
-                try:
+            config = json.loads(file_content)
+        else:
+            try:
                 config = yaml.safe_load(file_content)
             except:
                 try:
