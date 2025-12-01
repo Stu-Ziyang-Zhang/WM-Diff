@@ -1,4 +1,4 @@
-﻿import torch
+import torch
 import torch.backends.cudnn as cudnn
 import torch.optim as optim
 import sys
@@ -144,13 +144,16 @@ def main():
         except Exception:
             pass
 
+    use_checkpoint = getattr(args, 'use_checkpoint', False)
+    
     model = DiffusionCondUNet(
         in_channels=args.in_channels,
         out_channels=args.out_channels,
         dim=args.dim,
         dim_mults=args.dim_mults,
         base_ch=args.base_channels,
-        growth_rate=args.growth_rate
+        growth_rate=args.growth_rate,
+        use_checkpoint=use_checkpoint
     ).to(device)
 
     print(f"Model parameters: {count_parameters(model)}")
