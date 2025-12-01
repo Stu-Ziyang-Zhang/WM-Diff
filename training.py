@@ -103,6 +103,10 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                     
                     diffusion_loss = diffusion_loss_fn(predicted_noise, noise)
                     
+                    del labels_noisy, predicted_noise
+                    if device.type == 'cuda':
+                        torch.cuda.empty_cache()
+                    
                     time_step_seg = torch.zeros(BATCH_SIZE, dtype=torch.long, device=device)
                     outputs_seg = model(
                         inputs, 
@@ -117,9 +121,15 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                     
                     outputs = outputs_seg
                     
-                    outputs_np = outputs.data.cpu().numpy()
-                    labels_np = labels.data.cpu().numpy()
-                    evaluator.add_batch(labels_np, outputs_np[:, 1] if outputs.shape[1] > 1 else outputs_np.squeeze())
+                    with torch.no_grad():
+                        outputs_detached = outputs.detach()
+                        if outputs_detached.shape[1] > 1:
+                            outputs_np = outputs_detached[:, 1].cpu().numpy()
+                        else:
+                            outputs_np = outputs_detached.squeeze().cpu().numpy()
+                        labels_np = labels.cpu().numpy()
+                    evaluator.add_batch(labels_np, outputs_np)
+                    del outputs_detached, outputs_np, labels_np
                     
                     if not train:
                         with torch.no_grad():
@@ -128,11 +138,15 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                                 model, x_noisy_init, inputs, 
                                 timesteps=50, device=device
                             )
-                            outputs_np_ddim = outputs_ddim.data.cpu().numpy()
-                            evaluator.add_batch(
-                                labels_np, 
-                                outputs_np_ddim[:, 0] if outputs_ddim.shape[1] > 1 else outputs_np_ddim.squeeze()
-                            )
+                            if outputs_ddim.shape[1] > 1:
+                                outputs_ddim_np = outputs_ddim[:, 0].cpu().numpy()
+                            else:
+                                outputs_ddim_np = outputs_ddim.squeeze().cpu().numpy()
+                            labels_np = labels.cpu().numpy()
+                            evaluator.add_batch(labels_np, outputs_ddim_np)
+                            del outputs_ddim, outputs_ddim_np, labels_np, x_noisy_init
+                            if device.type == 'cuda':
+                                torch.cuda.empty_cache()
                 else:
                     if train_cond_net_only:
                         outputs = model.cond_net(inputs)
@@ -141,6 +155,7 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                         labels_expanded[:, 0] = 1.0 - labels_float
                         labels_expanded[:, 1] = labels_float
                         loss = bce_loss_fn(outputs, labels_expanded)
+                        del labels_expanded, labels_float
                     else:
                         if not train:
                             with torch.no_grad():
@@ -149,6 +164,7 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                                     model, x_noisy_init, inputs, 
                                     timesteps=50, device=device
                                 )
+                                del x_noisy_init
                             loss = torch.tensor(0.0, device=device)
                         else:
                             outputs = model(
@@ -159,49 +175,60 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                             )
                             loss = criterion(outputs, labels.unsqueeze(dim=1).float())
                     
-                    outputs_np = outputs.data.cpu().numpy()
-                    labels_np = labels.data.cpu().numpy()
-                    evaluator.add_batch(labels_np, outputs_np[:, 0] if outputs.shape[1] == 1 else (outputs_np[:, 1] if outputs.shape[1] > 1 else outputs_np.squeeze()))
+                    with torch.no_grad():
+                        outputs_detached = outputs.detach()
+                        if outputs_detached.shape[1] == 1:
+                            outputs_np = outputs_detached.squeeze().cpu().numpy()
+                        elif outputs_detached.shape[1] > 1:
+                            outputs_np = outputs_detached[:, 1].cpu().numpy()
+                        else:
+                            outputs_np = outputs_detached.squeeze().cpu().numpy()
+                        labels_np = labels.cpu().numpy()
+                    evaluator.add_batch(labels_np, outputs_np)
+                    del outputs_detached, outputs_np, labels_np
 
                     if save_patches and not train and save_dir is not None:
-                        all_inputs.append(inputs.cpu().numpy())
-                        
-                        if outputs.shape[1] > 1:
-                            outputs_np = F.softmax(outputs, dim=1)[:, 1].cpu().numpy()
-                        else:
-                            outputs_np = torch.sigmoid(outputs).squeeze().cpu().numpy()
-                            if len(outputs_np.shape) == 2:
-                                outputs_np = np.expand_dims(outputs_np, axis=0)
-                        
-                        all_outputs.append(outputs_np)
-                        all_labels.append(labels.cpu().numpy())
-                        
                         if i_batch < 5:
-                            for i in range(min(4, BATCH_SIZE)):
-                                patch_idx = i_batch * BATCH_SIZE + i
-                                
-                                input_patch = inputs[i].cpu().numpy()
-                                if input_patch.shape[0] == 1:
-                                    input_patch = input_patch.squeeze(0)
-                                elif input_patch.shape[0] == 3:
-                                    input_patch = input_patch.transpose(1, 2, 0)
-                                else:
-                                    input_patch = input_patch[0]
-                                
-                                input_patch = (input_patch - input_patch.min()) / (input_patch.max() - input_patch.min() + 1e-8)
+                            with torch.no_grad():
+                                inputs_cpu = inputs.cpu()
+                                labels_cpu = labels.cpu()
                                 
                                 if outputs.shape[1] > 1:
-                                    prob_map = F.softmax(outputs[i], dim=0)[1].cpu().numpy()
+                                    outputs_np = F.softmax(outputs, dim=1)[:, 1].detach().cpu().numpy()
                                 else:
-                                    prob_map = torch.sigmoid(outputs[i]).squeeze().cpu().numpy()
+                                    outputs_np = torch.sigmoid(outputs).squeeze().detach().cpu().numpy()
+                                    if len(outputs_np.shape) == 2:
+                                        outputs_np = np.expand_dims(outputs_np, axis=0)
                                 
-                                label_map = labels[i].cpu().numpy()
+                                for i in range(min(4, BATCH_SIZE)):
+                                    patch_idx = i_batch * BATCH_SIZE + i
+                                    
+                                    input_patch = inputs_cpu[i].numpy()
+                                    if input_patch.shape[0] == 1:
+                                        input_patch = input_patch.squeeze(0)
+                                    elif input_patch.shape[0] == 3:
+                                        input_patch = input_patch.transpose(1, 2, 0)
+                                    else:
+                                        input_patch = input_patch[0]
+                                    
+                                    input_patch = (input_patch - input_patch.min()) / (input_patch.max() - input_patch.min() + 1e-8)
+                                    
+                                    if outputs.shape[1] > 1:
+                                        prob_map = F.softmax(outputs[i], dim=0)[1].detach().cpu().numpy()
+                                    else:
+                                        prob_map = torch.sigmoid(outputs[i]).squeeze().detach().cpu().numpy()
+                                    
+                                    label_map = labels_cpu[i].numpy()
+                                    
+                                    binary_map = (prob_map > 0.5).astype(np.uint8) * 255
+                                    Image.fromarray((prob_map * 255).astype(np.uint8)).save(
+                                        os.path.join(patch_save_dir, f'patch_{patch_idx}_prob.png'))
+                                    Image.fromarray(binary_map).save(
+                                        os.path.join(patch_save_dir, f'patch_{patch_idx}_binary.png'))
                                 
-                                binary_map = (prob_map > 0.5).astype(np.uint8) * 255
-                                Image.fromarray((prob_map * 255).astype(np.uint8)).save(
-                                    os.path.join(patch_save_dir, f'patch_{patch_idx}_prob.png'))
-                                Image.fromarray(binary_map).save(
-                                    os.path.join(patch_save_dir, f'patch_{patch_idx}_binary.png'))
+                                del inputs_cpu, labels_cpu, outputs_np
+                                if device.type == 'cuda':
+                                    torch.cuda.empty_cache()
 
             if train:
                 if mixed_precision and device.type == 'cuda':
@@ -209,6 +236,8 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                     if i_batch % (grad_acc_steps + 1) == 0:
                         if not torch.isfinite(loss):
                             optimizer.zero_grad()
+                            if device.type == 'cuda':
+                                torch.cuda.empty_cache()
                             continue
 
                         scaler.step(optimizer)
@@ -217,6 +246,8 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                                 scheduler.step()
                         scaler.update()
                         optimizer.zero_grad()
+                        if i_batch % 10 == 0 and device.type == 'cuda':
+                            torch.cuda.empty_cache()
                 else:
                     (loss / (grad_acc_steps + 1)).backward()
                     if i_batch % (grad_acc_steps + 1) == 0:
@@ -225,6 +256,8 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                             if scheduler is not None:
                                 scheduler.step()
                         optimizer.zero_grad()
+                        if i_batch % 10 == 0 and device.type == 'cuda':
+                            torch.cuda.empty_cache()
 
             if i_batch == 0 and train and initial_state and 'loss' in initial_state:
                 forced_loss = initial_state.get('loss', 0.2)
@@ -304,12 +337,18 @@ def run_one_epoch(loader, model, criterion, optimizer=None, scheduler=None,
                         timesteps=50, device=device
                     )
                     
+                    del x_noisy_init
+                    
                     if outputs.shape[1] > 1:
-                        outputs = F.softmax(outputs, dim=1)[:, 1].cpu().numpy()
+                        outputs_np = F.softmax(outputs, dim=1)[:, 1].detach().cpu().numpy()
                     else:
-                        outputs = torch.sigmoid(outputs).squeeze(1).cpu().numpy()
-                        
-                    preds.append(outputs)
+                        outputs_np = torch.sigmoid(outputs).squeeze(1).detach().cpu().numpy()
+                    
+                    preds.append(outputs_np)
+                    del outputs, outputs_np
+                    
+                    if (batch_idx + 1) % 10 == 0 and device.type == 'cuda':
+                        torch.cuda.empty_cache()
             
             predictions = np.concatenate(preds, axis=0)
             pred_patches = np.expand_dims(predictions, axis=1)
